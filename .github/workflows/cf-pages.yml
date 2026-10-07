@@ -1,0 +1,68 @@
+name: deploy-grok2api-cf-pages
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Ensure D1 and KV
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          D1_ID=$(curl -s "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database" -H "Authorization: Bearer $CF_API_TOKEN" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{const j=JSON.parse(d);const r=(j.result||[]).find(x=>x.name==='grok2api');console.log(r?r.uuid:'')})")
+          if [ -z "$D1_ID" ]; then
+            D1_ID=$(curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database" -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" -d '{"name":"grok2api"}' | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{const j=JSON.parse(d);console.log(j.result?j.result.uuid:'')})")
+          fi
+          KV_ID=$(curl -s "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces" -H "Authorization: Bearer $CF_API_TOKEN" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{const j=JSON.parse(d);const r=(j.result||[]).find(x=>x.title==='grok2api-cache');console.log(r?r.id:'')})")
+          if [ -z "$KV_ID" ]; then
+            KV_ID=$(curl -s -X POST "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/storage/kv/namespaces" -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" -d '{"title":"grok2api-cache"}' | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{const j=JSON.parse(d);console.log(j.result?j.result.id:'')})")
+          fi
+          echo "D1_ID=$D1_ID" >> "$GITHUB_ENV"
+          echo "KV_ID=$KV_ID" >> "$GITHUB_ENV"
+          sed -i "s/REPLACE_WITH_D1_DATABASE_ID/$D1_ID/; s/REPLACE_WITH_KV_NAMESPACE_ID/$KV_ID/" wrangler.toml
+          echo "D1=$D1_ID KV=$KV_ID"
+
+      - name: Apply D1 migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: npx wrangler d1 migrations apply DB --remote --config wrangler.toml
+
+      - name: Deploy to Pages
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: npx wrangler pages deploy app/static --project-name grok2api
+
+      - name: Patch bindings
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: |
+          curl -s -X PATCH "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/pages/projects/grok2api" \
+            -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
+            -d "{\"deployment_configs\":{\"production\":{\"d1_databases\":{\"DB\":{\"id\":\"$D1_ID\"}},\"kv_namespaces\":{\"KV_CACHE\":{\"namespace_id\":\"$KV_ID\"}},\"env_vars\":{\"CACHE_RESET_TZ_OFFSET_MINUTES\":{\"value\":\"480\"},\"KV_CACHE_MAX_BYTES\":{\"value\":\"26214400\"},\"KV_CLEANUP_BATCH\":{\"value\":\"200\"},\"BUILD_SHA\":{\"value\":\"pages\"}}}}}" | head -c 600
+
+      - name: Health check
+        run: |
+          sleep 8
+          echo "--- /health ---"
+          curl -s -m 15 "https://grok2api-6v0.pages.dev/health" || true
+          echo
+          echo "--- /login status ---"
+          curl -s -m 15 -o /dev/null -w '%{http_code}\n' "https://grok2api-6v0.pages.dev/login" || true
