@@ -1,0 +1,32 @@
+name: test-fire
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fire:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clean cooldown then fire chat from US colo
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          GK_KEY: ${{ secrets.GK_TEST_KEY }}
+        run: |
+          GK_KEY=$(printf '%s' "$GK_KEY" | tr -d '\n\r')
+          D1API="https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/d1/database/264bf0d3-f6da-41fd-9e08-e818edf41660/query"
+          echo '--- 1. clean cooldown ---'
+          curl -s -m 25 -X POST "$D1API" -H "Authorization: Bearer $CF_API_TOKEN" -H 'Content-Type: application/json' -d '{"sql":"UPDATE tokens SET cooldown_until=NULL, failed_count=0, status=\"active\", last_failure_reason=NULL"}' | head -c 150
+          echo
+          echo '--- 2. fire 3x ---'
+          for i in 1 2 3; do
+            echo "shot $i:"
+            curl -s -m 90 "https://grok2api-6v0.pages.dev/v1/chat/completions" -H "Authorization: Bearer $GK_KEY" -H 'Content-Type: application/json' -d '{"model":"grok-4.1-fast","messages":[{"role":"user","content":"只回复两个字:在线"}],"max_tokens":32}' | head -c 500
+            echo
+            sleep 4
+          done
+          echo '--- 3. token state after ---'
+          curl -s -m 25 -X POST "$D1API" -H "Authorization: Bearer $CF_API_TOKEN" -H 'Content-Type: application/json' -d '{"sql":"SELECT status, failed_count, cooldown_until, substr(last_failure_reason,1,240) AS reason FROM tokens"}' | head -c 500
+          echo
+          echo '--- 4. pages trace (colo check) ---'
+          curl -s -m 15 "https://grok2api-6v0.pages.dev/cdn-cgi/trace" | grep -E '^colo=|^loc='
