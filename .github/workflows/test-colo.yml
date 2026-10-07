@@ -1,0 +1,23 @@
+name: test-colo-and-chat
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trace runner egress and Pages colo
+        run: |
+          echo '--- runner direct egress (cloudflare.com trace) ---'
+          curl -s -m 15 "https://www.cloudflare.com/cdn-cgi/trace" | grep -E '^ip=|^loc=|^colo=' || true
+          echo '--- pages trace (which colo serves us) ---'
+          curl -s -m 15 "https://grok2api-6v0.pages.dev/cdn-cgi/trace" | grep -E '^ip=|^loc=|^colo=' || true
+
+      - name: Test chat via Pages from US runner
+        env:
+          GK_KEY: ${{ secrets.GK_TEST_KEY }}
+        run: |
+          echo '--- chat test ---'
+          curl -s -m 90 "https://grok2api-6v0.pages.dev/v1/chat/completions" -H "Authorization: Bearer $GK_KEY" -H 'Content-Type: application/json' -d '{"model":"grok-4.1-fast","messages":[{"role":"user","content":"只回复两个字:在线"}],"max_tokens":32}' | head -c 700
+          echo
