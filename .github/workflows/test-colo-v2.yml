@@ -1,0 +1,96 @@
+name: test-colo-v2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: A - models endpoint
+        env:
+          GK_KEY: ${{ secrets.GK_TEST_KEY }}
+        run: |
+          echo '--- A: /v1/models ---'
+          curl -s -m 20 "https://grok2api-6v0.pages.dev/v1/models" -H "Authorization: Bearer $GK_KEY" | head -c 150
+          echo
+
+      - name: B - echo own body via httpbin
+        run: |
+          echo '--- B: what body does our runner send ---'
+          curl -s -m 20 -X POST "https://httpbin.org/post" -H 'Content-Type: application/json' -d '{"model":"grok-4.1-fast","messages":[{"role":"user","content":"hi"}]}' | python3 -c "import json,sys; d=json.load(sys.stdin); print('echo data:', repr(d.get('data'))[:220])"
+
+      - name: C - chat via python urllib
+        env:
+          GK_KEY: ${{ secrets.GK_TEST_KEY }}
+        run: |
+          echo '--- C: python client ---'
+          python3 - <<'PY'
+          import os, json, urllib.request, urllib.error
+          body = json.dumps({"model":"grok-4.1-fast","messages":[{"role":"user","content":"只回复两个字:在线"}],"max_tokens":32}).encode()
+          req = urllib.request.Request("https://grok2api-6v0.pages.dev/v1/chat/completions", body,
+              {"Authorization": "Bearer " + os.environ['GK_KEY'], "Content-Type": "application/json"})
+          try:
+              r = urllib.request.urlopen(req, timeout=90)
+              print('C status', r.status, ':', r.read(300))
+          except urllib.error.HTTPError as e:
+              print('C status', e.code, ':', e.read(400))
+          except Exception as e:
+              print('C err:', type(e).__name__, str(e)[:200])
+          PY
+
+      - name: D - direct upstream probe (grok.com)
+        env:
+          SSO: ${{ secrets.GK_SSO }}
+        run: |
+          echo '--- D: direct grok.com from runner ---'
+          python3 - <<'PY'
+          import os, json, uuid, base64, random, string, urllib.request, urllib.error
+          jwt = os.environ['SSO'].strip()
+          rs = lambda n: ''.join(random.choice(string.ascii_lowercase) for _ in range(n))
+          statsig = base64.b64encode(f"e:TypeError: Cannot read properties of undefined (reading '{rs(10)}')".encode()).decode()
+          body = {"temporary": True, "modelName": "grok-3", "message": "只回复两个字:在线",
+                  "fileAttachments": [], "imageAttachments": [], "disableSearch": False,
+                  "enableImageGeneration": True, "returnImageBytes": False, "returnRawGrokInXaiRequest": False,
+                  "enableImageStreaming": True, "imageGenerationCount": 2, "forceConcise": False,
+                  "toolOverrides": {}, "enableSideBySide": True, "sendFinalMetadata": True, "isReasoning": False,
+                  "webpageUrls": [], "disableTextFollowUps": True,
+                  "responseMetadata": {"requestModelDetails": {"modelId": "grok-3"}},
+                  "disableMemory": False, "forceSideBySide": False, "modelMode": "MODEL_MODE_GROK_3", "isAsyncChat": False}
+          req = urllib.request.Request('https://grok.com/rest/app-chat/conversations/new',
+              json.dumps(body).encode(),
+              {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36',
+               'Accept': '*/*', 'Accept-Language': 'zh-CN,zh;q=0.9', 'Origin': 'https://grok.com', 'Referer': 'https://grok.com/',
+               'Cookie': f'sso-rw={jwt};sso={jwt}',
+               'Content-Type': 'application/json',
+               'x-statsig-id': statsig, 'x-xai-request-id': str(uuid.uuid4())})
+          try:
+              r = urllib.request.urlopen(req, timeout=60)
+              print('D:', r.status, dict(r.headers).get('Content-Type'))
+              print(r.read(300))
+          except urllib.error.HTTPError as e:
+              print('D:', e.code, dict(e.headers).get('Content-Type'))
+              print(e.read(300))
+          except Exception as e:
+              print('D err:', type(e).__name__, str(e)[:200])
+          PY
+
+      - name: E - tail worker logs while firing one request
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          GK_KEY: ${{ secrets.GK_TEST_KEY }}
+        run: |
+          npx --yes wrangler@4 pages deployment tail --project-name grok2api --environment production --format json > /tmp/tail.log 2>&1 &
+          TAIL_PID=$!
+          sleep 12
+          curl -s -m 60 "https://grok2api-6v0.pages.dev/v1/chat/completions" -H "Authorization: Bearer $GK_KEY" -H 'Content-Type: application/json' -d '{"model":"grok-4.1-fast","messages":[{"role":"user","content":"hi"}],"max_tokens":16}' | head -c 300
+          echo
+          sleep 12
+          kill $TAIL_PID 2>/dev/null || true
+          echo '=== E tail output ==='
+          head -c 4000 /tmp/tail.log
