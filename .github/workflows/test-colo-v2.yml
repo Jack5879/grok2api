@@ -33,7 +33,7 @@ jobs:
           import os, json, urllib.request, urllib.error
           body = json.dumps({"model":"grok-4.1-fast","messages":[{"role":"user","content":"只回复两个字:在线"}],"max_tokens":32}).encode()
           req = urllib.request.Request("https://grok2api-6v0.pages.dev/v1/chat/completions", body,
-              {"Authorization": "Bearer " + os.environ['GK_KEY'], "Content-Type": "application/json"})
+              {"Authorization": "Bearer " + os.environ['GK_KEY'].strip(), "Content-Type": "application/json"})
           try:
               r = urllib.request.urlopen(req, timeout=90)
               print('C status', r.status, ':', r.read(300))
@@ -85,6 +85,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           GK_KEY: ${{ secrets.GK_TEST_KEY }}
         run: |
+          GK_KEY=$(printf '%s' "$GK_KEY" | tr -d '\n\r')
           npx --yes wrangler@4 pages deployment tail --project-name grok2api --environment production --format json > /tmp/tail.log 2>&1 &
           TAIL_PID=$!
           sleep 12
